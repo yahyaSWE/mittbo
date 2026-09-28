@@ -2,24 +2,66 @@ import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Image, KeyboardAvoidingView, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import { categories, formatDate, roleLabel, statusLabel, ticketNumber, type Category, type Dashboard, type Ticket, type TicketStatus } from "@mittbo/shared";
 
 let API_BASE = (process.env.EXPO_PUBLIC_API_URL || (Platform.OS === "android" ? "http://10.0.2.2:3002" : "http://localhost:3002")).replace(/\/$/, "");
 const STORAGE_KEY = "mittbo_session";
 const SERVER_KEY = "mittbo_server_url";
+type MobileSession = { token: string; refreshToken: string };
+let mobileSession: MobileSession | null = null;
+let tokenListener: ((value: string) => void) | null = null;
+let refreshPromise: Promise<boolean> | null = null;
 const C = { navy: "#132c49", green: "#087d68", pale: "#eaf8f4", bg: "#f6f9fd", white: "#fff", text: "#172a43", muted: "#65768c", line: "#e0e8f1", orange: "#a95a1b" };
 type Tab = "home" | "tickets" | "info";
 
-async function request<T>(path: string, token?: string, body?: object): Promise<T> {
+async function parseResponse<T>(response: Response): Promise<T> {
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try { payload = JSON.parse(raw); }
+    catch { throw new Error(`API:t svarade med ogiltigt format (HTTP ${response.status}).`); }
+  }
+  if (!response.ok) {
+    const message = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string" ? payload.error : "Något gick fel.";
+    throw new Error(`${message} (HTTP ${response.status})`);
+  }
+  if (payload === null) throw new Error(`API:t svarade utan data (HTTP ${response.status}).`);
+  return payload as T;
+}
+
+async function refreshMobileSession(): Promise<boolean> {
+  if (!mobileSession?.refreshToken) return false;
+  if (!refreshPromise) refreshPromise = (async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: mobileSession?.refreshToken }) });
+      const refreshed = await parseResponse<MobileSession>(response);
+      mobileSession = refreshed;
+      await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(refreshed));
+      tokenListener?.(refreshed.token);
+      return true;
+    } catch { return false; }
+    finally { refreshPromise = null; }
+  })();
+  return refreshPromise;
+}
+
+async function fetchWithSession(path: string, init: RequestInit, token?: string): Promise<Response> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    response = await fetch(`${API_BASE}${path}`, { ...init, headers: { ...init.headers, ...(token ? { Authorization: `Bearer ${mobileSession?.token || token}` } : {}) } });
+    if (response.status === 401 && token && await refreshMobileSession()) {
+      response = await fetch(`${API_BASE}${path}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${mobileSession?.token}` } });
+    }
   } catch {
     throw new Error(`Kunde inte nå MittBo-servern (${API_BASE}). Kontrollera att webben körs och att telefonen når datorn.`);
   }
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Något gick fel.");
-  return payload as T;
+  return response;
+}
+
+async function request<T>(path: string, token?: string, body?: object): Promise<T> {
+  const response = await fetchWithSession(path, { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }, token);
+  return parseResponse<T>(response);
 }
 
 async function pickImage() {
@@ -32,11 +74,19 @@ async function pickImage() {
 }
 
 async function sendImage(token: string, ticketId: string, asset: ImagePicker.ImagePickerAsset) {
+  const info = asset.fileSize ? null : await FileSystem.getInfoAsync(asset.uri);
+  const size = asset.fileSize || (info?.exists ? info.size : undefined);
+  if (!size || size > 5 * 1024 * 1024) throw new Error("Bilden får vara högst 5 MB.");
+  const type = asset.mimeType || "image/jpeg";
+  const upload = await request<{ uploadId: string; signedUrl: string; filename: string; contentType: string; size: number }>(`/api/tickets/${ticketId}/attachments/init`, token, {
+    filename: asset.fileName || "bild.jpg", contentType: type, size,
+  });
   const form = new FormData();
-  form.append("image", { uri: asset.uri, name: asset.fileName || "bild.jpg", type: asset.mimeType || "image/jpeg" } as unknown as Blob);
-  const response = await fetch(`${API_BASE}/api/tickets/${ticketId}/attachments`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Bilden kunde inte laddas upp.");
+  form.append("cacheControl", "3600");
+  form.append("", { uri: asset.uri, name: asset.fileName || "bild.jpg", type } as unknown as Blob);
+  const sent = await fetch(upload.signedUrl, { method: "PUT", body: form });
+  if (!sent.ok) throw new Error(`Bilden kunde inte laddas upp till Supabase (HTTP ${sent.status}).`);
+  await request(`/api/tickets/${ticketId}/attachments`, token, { uploadId: upload.uploadId, filename: upload.filename, contentType: upload.contentType, size: upload.size });
 }
 
 export default function App() {
@@ -50,16 +100,23 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [serverUrl, setServerUrl] = useState(API_BASE);
 
+  useEffect(() => { tokenListener = setToken; return () => { tokenListener = null; }; }, []);
+
   const reload = useCallback(async (session: string) => {
     setData(await request<Dashboard>("/api/dashboard", session));
   }, []);
   useEffect(() => {
     (async () => {
       const savedUrl = await SecureStore.getItemAsync(SERVER_KEY);
-      if (savedUrl) { API_BASE = savedUrl; setServerUrl(savedUrl); }
+      if (savedUrl && !process.env.EXPO_PUBLIC_API_URL) { API_BASE = savedUrl; setServerUrl(savedUrl); }
       const saved = await SecureStore.getItemAsync(STORAGE_KEY);
       if (saved) {
-        try { await reload(saved); setToken(saved); }
+        try {
+          const session = JSON.parse(saved) as MobileSession;
+          if (!session.token || !session.refreshToken) throw new Error("Ogiltig session");
+          mobileSession = session;
+          await reload(session.token); setToken(mobileSession?.token || session.token);
+        }
         catch { await SecureStore.deleteItemAsync(STORAGE_KEY); }
       }
       setBooting(false);
@@ -74,14 +131,15 @@ export default function App() {
       API_BASE = normalized;
       await SecureStore.setItemAsync(SERVER_KEY, normalized);
       setServerUrl(normalized);
-      const response = await request<{ token: string }>("/api/login", undefined, { email, password });
-      await SecureStore.setItemAsync(STORAGE_KEY, response.token);
+      const response = await request<MobileSession>("/api/login", undefined, { email, password });
+      mobileSession = response;
+      await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(response));
       await reload(response.token);
       setToken(response.token);
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   }
-  async function logout() { await SecureStore.deleteItemAsync(STORAGE_KEY); setToken(null); setData(null); setSelectedId(null); setTab("home"); }
+  async function logout() { mobileSession = null; await SecureStore.deleteItemAsync(STORAGE_KEY); setToken(null); setData(null); setSelectedId(null); setTab("home"); }
   async function act(path: string, body: object): Promise<boolean> {
     if (!token) return false;
     setBusy(true); setError("");
@@ -156,7 +214,7 @@ function TicketDetail({ ticket, data, busy, token, onImage, onAction }: { ticket
   const role = data.user.role;
   const assignee = data.users.find((item) => item.id === ticket.assigneeId);
   const building = data.buildings.find((item) => data.units.some((unit) => unit.id === ticket.unitId && unit.buildingId === item.id));
-  return <><View style={s.card}><View style={s.rowBetween}><Status status={ticket.status} /><Text style={s.date}>{formatDate(ticket.createdAt)}</Text></View><Text style={[s.cardTitle, { marginTop: 15 }]}>{ticket.title}</Text><Text style={s.bodyText}>{ticket.description}</Text><View style={s.divider} /><Field label="Plats" value={`${building?.address || ""}, ${data.units.find((item) => item.id === ticket.unitId)?.label || ""}`} /><Field label="Kategori" value={ticket.category} /><Field label="Ansvarig" value={assignee?.name || "Inte tilldelad"} /><Field label="Besök" value={ticket.visitAt ? new Date(ticket.visitAt).toLocaleString("sv-SE") : "Ingen tid planerad"} />{ticket.attachments?.length > 0 && <><View style={s.divider} /><Text style={s.h2}>Bilder</Text><View style={s.photoRow}>{ticket.attachments.map((photo) => <Image key={photo.id} style={s.photo} source={{ uri: `${API_BASE}/api/attachments/${photo.id}`, headers: { Authorization: `Bearer ${token}` } }} />)}</View></>}<Action label="Lägg till bild" secondary disabled={busy} onPress={() => void onImage()} /></View>{role === "admin" && <View style={s.card}><Text style={s.h2}>Förvaltarens åtgärder</Text><Text style={s.label}>Tilldela arbetare</Text>{data.users.filter((user) => user.role === "worker").map((worker) => <Pressable key={worker.id} style={s.choice} disabled={busy} onPress={() => void onAction({ action: "assign", assigneeId: worker.id })}><Text style={s.choiceText}>{worker.name}{ticket.assigneeId === worker.id ? "  ✓" : ""}</Text></Pressable>)}<Text style={s.label}>Prioritet</Text><View style={s.roleButtons}>{["low", "normal", "high"].map((priority) => <Pressable key={priority} style={[s.roleButton, ticket.priority === priority && s.roleButtonActive]} disabled={busy} onPress={() => void onAction({ action: "priority", priority })}><Text style={s.roleText}>{priority === "low" ? "Låg" : priority === "high" ? "Hög" : "Normal"}</Text></Pressable>)}</View></View>}{role !== "tenant" && ticket.status !== "closed" && <View style={s.card}><Text style={s.h2}>Utför arbete</Text><Text style={s.label}>Besökstid (ÅÅÅÅ-MM-DD TT:MM)</Text><TextInput style={s.input} value={visit} onChangeText={setVisit} placeholder="2026-10-01 09:00" placeholderTextColor="#9db0be" /><Action label="Spara besökstid" secondary disabled={busy || !/^\d{4}-\d\d-\d\d \d\d:\d\d$/.test(visit)} onPress={() => { const value = new Date(visit.replace(" ", "T")); if (!Number.isNaN(value.getTime())) void onAction({ action: "visit", visitAt: value.toISOString() }); }} />{ticket.status !== "in_progress" && ticket.status !== "resolved" && <Action label="Starta arbete" secondary disabled={busy} onPress={() => void onAction({ action: "status", status: "in_progress" })} />}{ticket.status !== "resolved" && <Action label="Markera åtgärdat" disabled={busy} onPress={() => void onAction({ action: "status", status: "resolved" })} />}</View>}{role === "tenant" && ticket.status === "resolved" && <Action label="Bekräfta att det är klart" onPress={() => void onAction({ action: "status", status: "closed" })} />}<View style={s.card}><Text style={s.h2}>Händelser och meddelanden</Text>{ticket.events.map((event) => <View style={s.event} key={event.id}><View style={s.eventDot} /><View style={s.flex}><Text style={s.eventActor}>{data.users.find((user) => user.id === event.actorId)?.name || "MittBo"}{event.visibility === "internal" ? "  · Intern anteckning" : ""}</Text><Text style={s.bodyText}>{event.body}</Text><Text style={s.date}>{formatDate(event.createdAt)}</Text></View></View>)}<View style={s.divider} /><Text style={s.label}>Nytt meddelande</Text><TextInput style={[s.input, s.multiline]} multiline value={message} onChangeText={setMessage} placeholder="Skriv din uppdatering…" placeholderTextColor="#9db0be" />{role !== "tenant" && <Pressable style={s.checkRow} onPress={() => setInternal(!internal)}><Text style={s.checkBox}>{internal ? "☑" : "□"}</Text><Text style={s.muted}>Endast intern anteckning</Text></Pressable>}<Action label="Skicka meddelande  →" disabled={busy || !message.trim()} onPress={async () => { if (await onAction({ action: "message", text: message, visibility: internal ? "internal" : "public" })) setMessage(""); }} /></View></>;
+  return <><View style={s.card}><View style={s.rowBetween}><Status status={ticket.status} /><Text style={s.date}>{formatDate(ticket.createdAt)}</Text></View><Text style={[s.cardTitle, { marginTop: 15 }]}>{ticket.title}</Text><Text style={s.bodyText}>{ticket.description}</Text><View style={s.divider} /><Field label="Plats" value={`${building?.address || ""}, ${data.units.find((item) => item.id === ticket.unitId)?.label || ""}`} /><Field label="Kategori" value={ticket.category} /><Field label="Ansvarig" value={assignee?.name || (ticket.assigneeId ? "Tilldelad" : "Inte tilldelad")} /><Field label="Besök" value={ticket.visitAt ? new Date(ticket.visitAt).toLocaleString("sv-SE") : "Ingen tid planerad"} />{ticket.attachments?.length > 0 && <><View style={s.divider} /><Text style={s.h2}>Bilder</Text><View style={s.photoRow}>{ticket.attachments.map((photo) => <Image key={photo.id} style={s.photo} source={{ uri: `${API_BASE}/api/attachments/${photo.id}`, headers: { Authorization: `Bearer ${token}` } }} />)}</View></>}<Action label="Lägg till bild" secondary disabled={busy} onPress={() => void onImage()} /></View>{role === "admin" && <View style={s.card}><Text style={s.h2}>Förvaltarens åtgärder</Text><Text style={s.label}>Tilldela arbetare</Text>{data.users.filter((user) => user.role === "worker").map((worker) => <Pressable key={worker.id} style={s.choice} disabled={busy} onPress={() => void onAction({ action: "assign", assigneeId: worker.id })}><Text style={s.choiceText}>{worker.name}{ticket.assigneeId === worker.id ? "  ✓" : ""}</Text></Pressable>)}<Text style={s.label}>Prioritet</Text><View style={s.roleButtons}>{["low", "normal", "high"].map((priority) => <Pressable key={priority} style={[s.roleButton, ticket.priority === priority && s.roleButtonActive]} disabled={busy} onPress={() => void onAction({ action: "priority", priority })}><Text style={s.roleText}>{priority === "low" ? "Låg" : priority === "high" ? "Hög" : "Normal"}</Text></Pressable>)}</View></View>}{role !== "tenant" && ticket.status !== "closed" && <View style={s.card}><Text style={s.h2}>Utför arbete</Text><Text style={s.label}>Besökstid (ÅÅÅÅ-MM-DD TT:MM)</Text><TextInput style={s.input} value={visit} onChangeText={setVisit} placeholder="2026-10-01 09:00" placeholderTextColor="#9db0be" /><Action label="Spara besökstid" secondary disabled={busy || !/^\d{4}-\d\d-\d\d \d\d:\d\d$/.test(visit)} onPress={() => { const value = new Date(visit.replace(" ", "T")); if (!Number.isNaN(value.getTime())) void onAction({ action: "visit", visitAt: value.toISOString() }); }} />{ticket.status !== "in_progress" && ticket.status !== "resolved" && <Action label="Starta arbete" secondary disabled={busy} onPress={() => void onAction({ action: "status", status: "in_progress" })} />}{ticket.status !== "resolved" && <Action label="Markera åtgärdat" disabled={busy} onPress={() => void onAction({ action: "status", status: "resolved" })} />}</View>}{role === "tenant" && ticket.status === "resolved" && <Action label="Bekräfta att det är klart" onPress={() => void onAction({ action: "status", status: "closed" })} />}<View style={s.card}><Text style={s.h2}>Händelser och meddelanden</Text>{ticket.events.map((event) => <View style={s.event} key={event.id}><View style={s.eventDot} /><View style={s.flex}><Text style={s.eventActor}>{data.users.find((user) => user.id === event.actorId)?.name || "MittBo"}{event.visibility === "internal" ? "  · Intern anteckning" : ""}</Text><Text style={s.bodyText}>{event.body}</Text><Text style={s.date}>{formatDate(event.createdAt)}</Text></View></View>)}<View style={s.divider} /><Text style={s.label}>Nytt meddelande</Text><TextInput style={[s.input, s.multiline]} multiline value={message} onChangeText={setMessage} placeholder="Skriv din uppdatering…" placeholderTextColor="#9db0be" />{role !== "tenant" && <Pressable style={s.checkRow} onPress={() => setInternal(!internal)}><Text style={s.checkBox}>{internal ? "☑" : "□"}</Text><Text style={s.muted}>Endast intern anteckning</Text></Pressable>}<Action label="Skicka meddelande  →" disabled={busy || !message.trim()} onPress={async () => { if (await onAction({ action: "message", text: message, visibility: internal ? "internal" : "public" })) setMessage(""); }} /></View></>;
 }
 
 function CreateTicket({ busy, onCancel, onSave }: { busy: boolean; onCancel: () => void; onSave: (body: object, image: ImagePicker.ImagePickerAsset | null) => Promise<void> }) {

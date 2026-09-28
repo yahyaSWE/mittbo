@@ -66,7 +66,7 @@ export interface Ticket {
 export interface Notice {
   id: string;
   organizationId: string;
-  buildingId: string;
+  buildingId: string | null;
   title: string;
   body: string;
   publishedAt: string;

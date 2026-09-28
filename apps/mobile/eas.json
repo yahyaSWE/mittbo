@@ -3,8 +3,7 @@
   "build": {
     "preview": {
       "distribution": "internal",
-      "android": { "buildType": "apk" },
-      "env": { "EXPO_PUBLIC_API_URL": "http://100.69.28.61:3002" }
+      "android": { "buildType": "apk" }
     }
   }
 }

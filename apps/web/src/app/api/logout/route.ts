@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
-import { sessionCookie } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { forbiddenOrigin } from "@/lib/api";
+import { clearWebSession, sameOrigin } from "@/lib/auth";
 
-export async function POST() {
-  const response = NextResponse.json({ ok: true });
-  response.cookies.set(sessionCookie, "", { httpOnly: true, path: "/", maxAge: 0 });
-  return response;
+export async function POST(request: NextRequest) {
+  if (!sameOrigin(request)) return forbiddenOrigin();
+  await clearWebSession();
+  return NextResponse.json({ ok: true });
 }

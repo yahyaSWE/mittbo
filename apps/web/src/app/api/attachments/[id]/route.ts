@@ -1,26 +1,24 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { sessionIdentity } from "@/lib/auth";
-import { dataDir, withStore } from "@/lib/store";
+import { serverError, unauthorized } from "@/lib/api";
+import { getCurrentUser } from "@/lib/auth";
+import { dbError, getTicketWithAccess, uuidPattern } from "@/lib/repository";
 
 export const runtime = "nodejs";
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(request: NextRequest, context: Context) {
-  const userId = await sessionIdentity(request);
-  if (!userId) return NextResponse.json({ error: "Logga in för att fortsätta." }, { status: 401 });
-  const { id } = await context.params;
-  const attachment = await withStore((store) => {
-    const user = store.users.find((item) => item.id === userId);
-    if (!user) return null;
-    const ticket = store.tickets.find((item) => item.attachments?.some((image) => image.id === id));
-    if (!ticket || ticket.organizationId !== user.organizationId || user.role === "tenant" && ticket.tenantId !== user.id || user.role === "worker" && ticket.assigneeId !== user.id) return null;
-    return ticket.attachments.find((image) => image.id === id) || null;
-  });
-  if (!attachment) return NextResponse.json({ error: "Bilden hittades inte." }, { status: 404 });
   try {
-    const bytes = await readFile(path.join(dataDir, "uploads", attachment.id));
-    return new NextResponse(new Uint8Array(bytes), { headers: { "Content-Type": attachment.contentType, "Content-Disposition": "inline", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
-  } catch { return NextResponse.json({ error: "Bilden kunde inte läsas." }, { status: 404 }); }
+    const identity = await getCurrentUser(request);
+    if (!identity) return unauthorized();
+    const { id } = await context.params;
+    if (!uuidPattern.test(id)) return NextResponse.json({ error: "Bilden hittades inte." }, { status: 404 });
+    const result = await identity.db.from("ticket_attachments").select("*").eq("id", id).maybeSingle();
+    dbError(result.error);
+    if (!result.data) return NextResponse.json({ error: "Bilden hittades inte." }, { status: 404 });
+    const ticket = await getTicketWithAccess(identity.db, result.data.ticket_id);
+    if (!ticket) return NextResponse.json({ error: "Bilden hittades inte." }, { status: 404 });
+    const signed = await identity.db.storage.from("ticket-attachments").createSignedUrl(result.data.storage_path, 60);
+    if (signed.error || !signed.data) return NextResponse.json({ error: "Bilden kunde inte läsas." }, { status: 404 });
+    return NextResponse.redirect(signed.data.signedUrl, { headers: { "Cache-Control": "private, no-store" } });
+  } catch (error) { return serverError(error); }
 }

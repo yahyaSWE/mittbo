@@ -5,7 +5,12 @@
   "scripts": {
     "web": "pnpm --filter @mittbo/web dev --port 3002",
     "mobile": "pnpm --filter @mittbo/mobile start",
+    "seed": "node --env-file-if-exists=apps/web/.env.local scripts/seed.mjs",
+    "test:rls": "node --env-file-if-exists=apps/web/.env.local scripts/test-rls.mjs",
     "check": "pnpm --filter @mittbo/web typecheck && pnpm --filter @mittbo/mobile typecheck",
     "build": "pnpm --filter @mittbo/web build"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.117.2"
   }
 }
