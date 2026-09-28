@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { categories, type Category } from "@mittbo/shared";
 import { forbiddenOrigin, serverError, unauthorized } from "@/lib/api";
 import { getCurrentUser, sameOrigin } from "@/lib/auth";
@@ -20,13 +21,10 @@ export async function POST(request: NextRequest) {
     if (title.length < 4 || title.length > 100 || description.length < 8 || description.length > 2000 || !categories.includes(category)) {
       return NextResponse.json({ error: "Ange rubrik, kategori och en beskrivning på minst åtta tecken." }, { status: 400 });
     }
-    const { data, error } = await db.from("tickets").insert({ organization_id: user.organizationId, unit_id: user.unitId, tenant_id: user.id, title, category, description, priority: "normal", status: "received" }).select("id").single();
-    if (error) {
-      console.error("Ticket insert failed", { code: error.code, message: error.message, details: error.details });
-      return NextResponse.json({ error: "Felanmälan kunde inte sparas.", diagnostic: { code: error.code, message: error.message } }, { status: 500 });
-    }
-    if (!data) throw new Error("Ärendet kunde inte sparas.");
-    const ticket = await getTicketWithAccess(db, data.id);
+    const id = randomUUID();
+    const { error } = await db.from("tickets").insert({ id, organization_id: user.organizationId, unit_id: user.unitId, tenant_id: user.id, title, category, description, priority: "normal", status: "received" });
+    dbError(error);
+    const ticket = await getTicketWithAccess(db, id);
     if (!ticket) throw new Error("Ärendet kunde inte läsas efter skapande.");
     return NextResponse.json(ticket, { status: 201 });
   } catch (error) { return serverError(error); }
