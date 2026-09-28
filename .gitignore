@@ -1,0 +1,11 @@
+node_modules
+.next
+.expo
+dist
+*.tsbuildinfo
+data/
+.env
+.env.local
+apps/mobile/.env
+tmp
+output/*.apk
