@@ -21,7 +21,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Ange rubrik, kategori och en beskrivning på minst åtta tecken." }, { status: 400 });
     }
     const { data, error } = await db.from("tickets").insert({ organization_id: user.organizationId, unit_id: user.unitId, tenant_id: user.id, title, category, description, priority: "normal", status: "received" }).select("id").single();
-    dbError(error);
+    if (error) {
+      console.error("Ticket insert failed", { code: error.code, message: error.message, details: error.details });
+      return NextResponse.json({ error: "Felanmälan kunde inte sparas.", diagnostic: { code: error.code, message: error.message } }, { status: 500 });
+    }
     if (!data) throw new Error("Ärendet kunde inte sparas.");
     const ticket = await getTicketWithAccess(db, data.id);
     if (!ticket) throw new Error("Ärendet kunde inte läsas efter skapande.");
