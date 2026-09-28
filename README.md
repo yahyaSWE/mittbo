@@ -11,7 +11,7 @@ pnpm install
 pnpm web
 ```
 
-Öppna `http://localhost:3002`. Starta mobilappen med `pnpm mobile`. För fysisk telefon, kopiera `apps/mobile/.env.example` till `apps/mobile/.env` och ange antingen en nåbar lokal IP-adress med port 3002 eller din Vercel-URL. Android-emulatorn använder `http://10.0.2.2:3002` och iOS-simulatorn `http://localhost:3002` om variabeln saknas. Bygg om appen efter ändring av `EXPO_PUBLIC_API_URL` i en installerad APK. Inloggningssidan har också ett serveradressfält för test.
+Öppna `http://localhost:3002`. Starta mobilappen med `pnpm mobile`. För fysisk telefon, kopiera `apps/mobile/.env.example` till `apps/mobile/.env` och ange antingen en nåbar lokal IP-adress med port 3002 eller MittBos Vercel-URL. Android-emulatorn använder `http://10.0.2.2:3002` och iOS-simulatorn `http://localhost:3002` i utvecklingsläge om variabeln saknas; en byggd APK använder `https://mittbo-web.vercel.app` som standard. `EXPO_PUBLIC_API_URL` ska peka på MittBos Next.js-webbserver, aldrig på Supabase-projektets URL. Bygg om appen efter ändring av `EXPO_PUBLIC_API_URL` i en installerad APK. Inloggningssidan har också ett serveradressfält för test.
 
 ## Supabase-installation och demodata
 

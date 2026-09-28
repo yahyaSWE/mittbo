@@ -5,7 +5,10 @@ import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { categories, formatDate, roleLabel, statusLabel, ticketNumber, type Category, type Dashboard, type Ticket, type TicketStatus } from "@mittbo/shared";
 
-let API_BASE = (process.env.EXPO_PUBLIC_API_URL || (Platform.OS === "android" ? "http://10.0.2.2:3002" : "http://localhost:3002")).replace(/\/$/, "");
+const DEFAULT_API_BASE = __DEV__ ? (Platform.OS === "android" ? "http://10.0.2.2:3002" : "http://localhost:3002") : "https://mittbo-web.vercel.app";
+const isSupabaseAddress = (url: string) => /^https?:\/\/[^/]+\.supabase\.co(?::\d+)?$/i.test(url);
+const configuredApiBase = process.env.EXPO_PUBLIC_API_URL?.trim().replace(/\/+$/, "");
+let API_BASE = configuredApiBase && !isSupabaseAddress(configuredApiBase) ? configuredApiBase : DEFAULT_API_BASE;
 const STORAGE_KEY = "mittbo_session";
 const SERVER_KEY = "mittbo_server_url";
 type MobileSession = { token: string; refreshToken: string };
@@ -108,7 +111,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       const savedUrl = await SecureStore.getItemAsync(SERVER_KEY);
-      if (savedUrl && !process.env.EXPO_PUBLIC_API_URL) { API_BASE = savedUrl; setServerUrl(savedUrl); }
+      if (savedUrl && !isSupabaseAddress(savedUrl)) { API_BASE = savedUrl; setServerUrl(savedUrl); }
       const saved = await SecureStore.getItemAsync(STORAGE_KEY);
       if (saved) {
         try {
@@ -128,13 +131,14 @@ export default function App() {
     try {
       const normalized = url.trim().replace(/\/+$/, "");
       if (!/^https?:\/\/[^/]+(?::\d+)?$/.test(normalized)) throw new Error("Ange en giltig serveradress, till exempel http://192.168.1.10:3002.");
+      if (isSupabaseAddress(normalized)) throw new Error("Ange MittBos webbadress https://mittbo-web.vercel.app, inte Supabase-adressen.");
       API_BASE = normalized;
-      await SecureStore.setItemAsync(SERVER_KEY, normalized);
-      setServerUrl(normalized);
       const response = await request<MobileSession>("/api/login", undefined, { email, password });
       mobileSession = response;
       await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(response));
       await reload(response.token);
+      await SecureStore.setItemAsync(SERVER_KEY, normalized);
+      setServerUrl(normalized);
       setToken(response.token);
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -190,7 +194,7 @@ function Login({ busy, error, serverUrl, onSubmit }: { busy: boolean; error: str
   const [email, setEmail] = useState("emma@demo.mittbo.se");
   const [password, setPassword] = useState("MittBo2026!");
   const [server, setServer] = useState(serverUrl);
-  return <SafeAreaView style={s.safe}><StatusBar barStyle="light-content" backgroundColor={C.navy} /><ScrollView keyboardShouldPersistTaps="handled"><View style={s.loginHero}><Text style={s.loginLogo}>⌂  MittBo</Text><Text style={s.loginTitle}>Hela boendet.{"\n"}<Text style={{ color: "#91dfc4" }}>På ett ställe.</Text></Text><Text style={s.loginIntro}>Samma ärende från boende till förvaltare och arbetare.</Text></View><View style={s.loginBody}><Text style={s.h2}>Välkommen tillbaka</Text><Text style={s.muted}>Välj ett demokonto eller skriv dina uppgifter.</Text><Text style={s.label}>E-postadress</Text><TextInput autoCapitalize="none" keyboardType="email-address" style={s.input} value={email} onChangeText={setEmail} /><Text style={s.label}>Lösenord</Text><TextInput secureTextEntry style={s.input} value={password} onChangeText={setPassword} /><Text style={s.label}>Serveradress för test</Text><TextInput autoCapitalize="none" autoCorrect={false} keyboardType="url" style={s.input} value={server} onChangeText={setServer} /><Text style={s.muted}>Telefonen måste nå datorn på samma nätverk.</Text>{error ? <Text style={s.errorText}>{error}</Text> : null}<Action label={busy ? "Loggar in…" : "Logga in"} disabled={busy} onPress={() => void onSubmit(email.trim().toLowerCase(), password, server)} /><Text style={[s.label, { marginTop: 25 }]}>Prova en roll</Text><View style={s.roleButtons}>{[{ label: "Boende", email: "emma@demo.mittbo.se" }, { label: "Förvaltare", email: "admin@demo.mittbo.se" }, { label: "Arbetare", email: "arbetare@demo.mittbo.se" }].map((item) => <Pressable key={item.email} style={[s.roleButton, email === item.email && s.roleButtonActive]} onPress={() => setEmail(item.email)}><Text style={[s.roleText, email === item.email && { color: C.green }]}>{item.label}</Text></Pressable>)}</View><Text style={s.demo}>Lösenord för alla demokonton: MittBo2026!</Text></View></ScrollView></SafeAreaView>;
+  return <SafeAreaView style={s.safe}><StatusBar barStyle="light-content" backgroundColor={C.navy} /><ScrollView keyboardShouldPersistTaps="handled"><View style={s.loginHero}><Text style={s.loginLogo}>⌂  MittBo</Text><Text style={s.loginTitle}>Hela boendet.{"\n"}<Text style={{ color: "#91dfc4" }}>På ett ställe.</Text></Text><Text style={s.loginIntro}>Samma ärende från boende till förvaltare och arbetare.</Text></View><View style={s.loginBody}><Text style={s.h2}>Välkommen tillbaka</Text><Text style={s.muted}>Välj ett demokonto eller skriv dina uppgifter.</Text><Text style={s.label}>E-postadress</Text><TextInput autoCapitalize="none" keyboardType="email-address" style={s.input} value={email} onChangeText={setEmail} /><Text style={s.label}>Lösenord</Text><TextInput secureTextEntry style={s.input} value={password} onChangeText={setPassword} /><Text style={s.label}>MittBo-serverns adress</Text><TextInput autoCapitalize="none" autoCorrect={false} keyboardType="url" style={s.input} value={server} onChangeText={setServer} /><Text style={s.muted}>Ange webbappens adress. En lokal adress kräver samma nätverk som datorn.</Text>{error ? <Text style={s.errorText}>{error}</Text> : null}<Action label={busy ? "Loggar in…" : "Logga in"} disabled={busy} onPress={() => void onSubmit(email.trim().toLowerCase(), password, server)} /><Text style={[s.label, { marginTop: 25 }]}>Prova en roll</Text><View style={s.roleButtons}>{[{ label: "Boende", email: "emma@demo.mittbo.se" }, { label: "Förvaltare", email: "admin@demo.mittbo.se" }, { label: "Arbetare", email: "arbetare@demo.mittbo.se" }].map((item) => <Pressable key={item.email} style={[s.roleButton, email === item.email && s.roleButtonActive]} onPress={() => setEmail(item.email)}><Text style={[s.roleText, email === item.email && { color: C.green }]}>{item.label}</Text></Pressable>)}</View><Text style={s.demo}>Lösenord för alla demokonton: MittBo2026!</Text></View></ScrollView></SafeAreaView>;
 }
 
 function HomeView({ data, onTicket, onCreate, onTab }: { data: Dashboard; onTicket: (id: string) => void; onCreate: () => void; onTab: (tab: Tab) => void }) {
